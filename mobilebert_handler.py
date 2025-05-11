@@ -264,11 +264,3 @@ def answer_question(question: str, context: str = "") -> dict:
     except Exception as e:
         print(f"[Sentiment Error] ❌ {e}")
 
-    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and answer_text != ""
-
-    return {
-        "answer": answer_text or "Let me check on that and get back to you.",
-        "sentiment": sentiment,
-        "confidence": confidence,
-        "escalate": escalate
-    }
