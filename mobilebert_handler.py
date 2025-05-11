@@ -1,8 +1,12 @@
 import os
+import random
 import torch
 import re
+
 from flask import Flask, request, jsonify
+
 from cannabis_nlp import is_cannabis_related, infer_marijuana_context
+
 from transformers import (
     MobileBertTokenizer,
     MobileBertForQuestionAnswering,
@@ -40,24 +44,14 @@ except Exception as e:
 # === Main inference function
 def answer_question(question: str, context: str = "") -> dict:
     original = question.strip()
-    question = infer_marijuana_context(original)
+    inferred = infer_marijuana_context(original)
+    cannabis_match = is_cannabis_related(inferred)
 
-    if DEBUG:
-        print(f"[Input] 🗣 Original: {original}")
-        print(f"[Input] 🔍 Inferred: {question}")
-        print(f"[Input] 📘 Context: {context[:100]}...")
-
-    if not question:
-        return _empty_result()
-
-    if not is_cannabis_related(question):
-        return {
-            "answer": "I'm here to help with cannabis-related questions! Feel free to ask about products, strains, effects, or recommendations.",
-            "sentiment": "NEUTRAL",
-            "confidence": 1.0,
-            "escalate": False
-        }
-
+    print("\n======================= 🔍 Inference Trace =======================")
+    print(f"[Input]         🧾 Original: {original}")
+    print(f"[Input]         🧠 Inferred: {inferred}")
+    print(f"[Filter]        🌿 Cannabis Related: {cannabis_match}")
+    
     if not context.strip():
         context = (
             "Cannabis is used for pain, anxiety, insomnia, appetite, and relaxation. "
@@ -65,13 +59,34 @@ def answer_question(question: str, context: str = "") -> dict:
             "Strains like indica are more sedative, while sativa is more energizing. "
             "Compounds like THC and CBD contribute to effects."
         )
-        if DEBUG:
-            print("[Context] ℹ️ Using fallback context.")
+        print(f"[Context]       📘 Using fallback context.")
 
+    else:
+        print(f"[Context]       📘 Custom context detected ({len(context)} chars)")
+
+    if not cannabis_match:
+        print(f"[Decision]      🚫 Rejected as non-cannabis question. Sending FAQ help.\n")
+        return {
+	    "answer": (
+	        "I'm here to help with cannabis-related questions. "
+	        "Here are a few things I can help with:\n\n"
+	        "• Which strains are good for sleep or pain?\n"
+	        "• What’s the difference between sativa and indica?\n"
+	        "• How do edibles or tinctures work?\n"
+	        "• What’s a good beginner product?\n"
+	        "• What does 'full spectrum' mean?\n\n"
+	        "Feel free to ask me one of these or tell me what you're looking for! 🌿"
+	    ),
+	    "sentiment": "NEUTRAL",
+	    "confidence": 1.0,
+	    "escalate": False
+	}
+
+    # === QA Inference ===
     answer_text = ""
     try:
         inputs = tokenizer_qa.encode_plus(
-            question,
+            inferred,
             context,
             return_tensors="pt",
             truncation=True,
@@ -83,65 +98,61 @@ def answer_question(question: str, context: str = "") -> dict:
         with torch.no_grad():
             outputs = model_qa(**inputs)
 
-        start_logits = outputs.start_logits[0]
-        end_logits = outputs.end_logits[0]
+        start = torch.argmax(outputs.start_logits).item()
+        end = torch.argmax(outputs.end_logits).item() + 1
+        start_conf = outputs.start_logits.max().item()
+        end_conf = outputs.end_logits.max().item()
 
-        # Logit confidence margin
-        start_conf = torch.topk(start_logits, 2).values
-        end_conf = torch.topk(end_logits, 2).values
-        logit_margin = (start_conf[0] - start_conf[1] + end_conf[0] - end_conf[1]).item()
+        print(f"[QA]            📍 Start={start}, End={end}, Conf=[{start_conf:.2f}, {end_conf:.2f}]")
 
-        start = torch.argmax(start_logits).item()
-        end = torch.argmax(end_logits).item() + 1
-
-        if DEBUG:
-            print(f"[QA] Logit margin: {logit_margin:.2f}")
-            print(f"[QA] Start: {start}, End: {end}")
-
-        if logit_margin < MIN_LOGIT_MARGIN:
-            print("[QA] ❌ Low logit margin — rejecting")
-        elif 0 <= start < end <= len(input_ids):
+        if 0 <= start < end <= len(input_ids):
             tokens = input_ids[start:end]
             answer_text = tokenizer_qa.decode(tokens, skip_special_tokens=True).strip()
-            print(f"[QA] ✅ Raw Answer: {answer_text}")
-
-            # Filter out weak answers
-            if len(answer_text.split()) < 2 or answer_text.lower() in {"yes", "no", "it is", "cannabis", "the answer is"}:
-                print("[QA] ⚠️ Short or vague answer — rejecting")
-                answer_text = ""
+            print(f"[QA]            ✅ Answer: {answer_text}")
         else:
-            print("[QA] ⚠️ Invalid span")
-            answer_text = ""
+            print("[QA]            ⚠️ Invalid token span for answer.")
 
     except Exception as e:
-        print(f"[QA Error] ❌ {e}")
+        print(f"[QA Error]      ❌ {e}")
         answer_text = ""
 
-    # === Sentiment Analysis
+    # === Sentiment ===
     sentiment = "NEUTRAL"
     confidence = 0.0
     try:
-        sentiment_result = sentiment_pipeline(question)[0]
+        sentiment_result = sentiment_pipeline(inferred)[0]
         sentiment = sentiment_result.get("label", "NEUTRAL")
         confidence = round(float(sentiment_result.get("score", 0.0)), 3)
-        print(f"[Sentiment] 📊 {sentiment} ({confidence})")
+        print(f"[Sentiment]     📊 {sentiment} ({confidence})")
     except Exception as e:
-        print(f"[Sentiment Error] ❌ {e}")
+        print(f"[SentimentError] ❌ {e}")
 
-    if not answer_text:
-        answer_text = (
-            "I'm not totally sure, but I can help guide you to the right cannabis product. "
-            "Tell me a bit more about what you're looking for — effects, formats, or use case?"
-        )
+    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and bool(answer_text)
 
-    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD
+    print(f"[Decision]      🚦 Escalate: {escalate}")
+    print("================================================================\n")
 
     return {
-        "answer": answer_text,
+        "answer": answer_text or "I'm not totally sure, but I can help guide you. Can you clarify your question?",
         "sentiment": sentiment,
         "confidence": confidence,
         "escalate": escalate
     }
+
+
+
+
+FAQ_SUGGESTIONS = [
+    "Which strains are best for relaxation or sleep?",
+    "What’s the difference between sativa and indica?",
+    "How strong are edibles and how long do they last?",
+    "Can cannabis help with anxiety or focus?",
+    "What’s a good product for first-time users?"
+]
+
+def get_faq_suggestion():
+    return "Here’s something you can ask:\n• " + "\n• ".join(random.sample(FAQ_SUGGESTIONS, 3))
+
 
 def _empty_result():
     return {
