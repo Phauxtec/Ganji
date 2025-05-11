@@ -264,3 +264,32 @@ def answer_question(question: str, context: str = "") -> dict:
     except Exception as e:
         print(f"[Sentiment Error] ❌ {e}")
 
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/ask', methods=['POST'])
+def ask():
+    try:
+        data = request.get_json(force=True)
+        if not data or 'message' not in data:
+            return jsonify({"error": "Missing 'message' in request"}), 400
+
+        user_message = data['message']
+        print(f"[API] Received: {user_message}")
+
+        result = answer_question(user_message)
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"[API Error] ❌ {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+if __name__ == '__main__':
+    port = int(os.getenv("PORT", 8800))
+    print(f"🚀 BERT handler running on http://0.0.0.0:{port}")
+    app.run(host='0.0.0.0', port=port)
