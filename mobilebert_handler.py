@@ -1,9 +1,8 @@
 import os
 import torch
 import re
-
+from flask import Flask, request, jsonify
 from cannabis_nlp import is_cannabis_related, infer_marijuana_context
-
 from transformers import (
     MobileBertTokenizer,
     MobileBertForQuestionAnswering,
@@ -13,11 +12,12 @@ from transformers import (
 )
 
 # === Environment ===
-MODEL_NAME_QA = os.getenv("MODEL_NAME", "csarron/mobilebert-uncased-squad-v2")
+MODEL_NAME_QA = os.getenv("MODEL_NAME", "deepset/minilm-uncased-squad2")
 MODEL_NAME_SENTIMENT = os.getenv("SENTIMENT_MODEL", "distilbert-base-uncased-finetuned-sst-2-english")
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.7))
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.5))
 MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", 512))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+MIN_LOGIT_MARGIN = float(os.getenv("MIN_LOGIT_MARGIN", 2.0))  # for QA confidence
 
 # === Device setup ===
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,7 +40,7 @@ except Exception as e:
 # === Main inference function
 def answer_question(question: str, context: str = "") -> dict:
     original = question.strip()
-    question = infer_marijuana_context(original)  # 🔁 Auto-infer vague input
+    question = infer_marijuana_context(original)
 
     if DEBUG:
         print(f"[Input] 🗣 Original: {original}")
@@ -58,7 +58,6 @@ def answer_question(question: str, context: str = "") -> dict:
             "escalate": False
         }
 
-    # === Provide fallback default context
     if not context.strip():
         context = (
             "Cannabis is used for pain, anxiety, insomnia, appetite, and relaxation. "
@@ -67,9 +66,8 @@ def answer_question(question: str, context: str = "") -> dict:
             "Compounds like THC and CBD contribute to effects."
         )
         if DEBUG:
-            print("[Context] ℹ️ Fallback default context used.")
+            print("[Context] ℹ️ Using fallback context.")
 
-    # === Run QA
     answer_text = ""
     try:
         inputs = tokenizer_qa.encode_plus(
@@ -85,18 +83,32 @@ def answer_question(question: str, context: str = "") -> dict:
         with torch.no_grad():
             outputs = model_qa(**inputs)
 
-        start = torch.argmax(outputs.start_logits).item()
-        end = torch.argmax(outputs.end_logits).item() + 1
+        start_logits = outputs.start_logits[0]
+        end_logits = outputs.end_logits[0]
+
+        # Logit confidence margin
+        start_conf = torch.topk(start_logits, 2).values
+        end_conf = torch.topk(end_logits, 2).values
+        logit_margin = (start_conf[0] - start_conf[1] + end_conf[0] - end_conf[1]).item()
+
+        start = torch.argmax(start_logits).item()
+        end = torch.argmax(end_logits).item() + 1
 
         if DEBUG:
+            print(f"[QA] Logit margin: {logit_margin:.2f}")
             print(f"[QA] Start: {start}, End: {end}")
-            print(f"[QA] Start logit max: {outputs.start_logits.max().item():.3f}")
-            print(f"[QA] End logit max: {outputs.end_logits.max().item():.3f}")
 
-        if 0 <= start < end <= len(input_ids):
+        if logit_margin < MIN_LOGIT_MARGIN:
+            print("[QA] ❌ Low logit margin — rejecting")
+        elif 0 <= start < end <= len(input_ids):
             tokens = input_ids[start:end]
             answer_text = tokenizer_qa.decode(tokens, skip_special_tokens=True).strip()
-            print(f"[QA] ✅ Answer: {answer_text}")
+            print(f"[QA] ✅ Raw Answer: {answer_text}")
+
+            # Filter out weak answers
+            if len(answer_text.split()) < 2 or answer_text.lower() in {"yes", "no", "it is", "cannabis", "the answer is"}:
+                print("[QA] ⚠️ Short or vague answer — rejecting")
+                answer_text = ""
         else:
             print("[QA] ⚠️ Invalid span")
             answer_text = ""
@@ -105,7 +117,7 @@ def answer_question(question: str, context: str = "") -> dict:
         print(f"[QA Error] ❌ {e}")
         answer_text = ""
 
-    # === Run Sentiment
+    # === Sentiment Analysis
     sentiment = "NEUTRAL"
     confidence = 0.0
     try:
@@ -116,32 +128,25 @@ def answer_question(question: str, context: str = "") -> dict:
     except Exception as e:
         print(f"[Sentiment Error] ❌ {e}")
 
-from flask import Flask, request, jsonify
+    if not answer_text:
+        answer_text = (
+            "I'm not totally sure, but I can help guide you to the right cannabis product. "
+            "Tell me a bit more about what you're looking for — effects, formats, or use case?"
+        )
 
-app = Flask(__name__)
+    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD
 
-@app.route('/ask', methods=['POST'])
-def ask():
-    try:
-        data = request.get_json(force=True)
-        if not data or 'message' not in data:
-            return jsonify({"error": "Missing 'message' in request"}), 400
+    return {
+        "answer": answer_text,
+        "sentiment": sentiment,
+        "confidence": confidence,
+        "escalate": escalate
+    }
 
-        user_message = data['message']
-        print(f"[API] Received: {user_message}")
-
-        result = answer_question(user_message)
-        return jsonify(result), 200
-
-    except Exception as e:
-        print(f"[API Error] ❌ {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"}), 200
-
-if __name__ == '__main__':
-    port = int(os.getenv("PORT", 8800))
-    print(f"🚀 BERT handler running on http://0.0.0.0:{port}")
-    app.run(host='0.0.0.0', port=port)
+def _empty_result():
+    return {
+        "answer": "",
+        "sentiment": "NEUTRAL",
+        "confidence": 0.0,
+        "escalate": False
+    }
