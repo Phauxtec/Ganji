@@ -187,11 +187,15 @@ def is_cannabis_related(text: str) -> bool:
 
 # === Main inference function
 def answer_question(question: str, context: str = "") -> dict:
-    if DEBUG:
-        print(f"[Input] Question: {question}")
-        print(f"[Input] Context: {context}")
+    original = question.strip()
+    question = infer_marijuana_context(original)  # 🔁 Auto-infer vague input
 
-    if not question or not question.strip():
+    if DEBUG:
+        print(f"[Input] 🗣 Original: {original}")
+        print(f"[Input] 🔍 Inferred: {question}")
+        print(f"[Input] 📘 Context: {context[:100]}...")
+
+    if not question:
         return _empty_result()
 
     if not is_cannabis_related(question):
@@ -201,6 +205,17 @@ def answer_question(question: str, context: str = "") -> dict:
             "confidence": 1.0,
             "escalate": False
         }
+
+    # === Provide fallback default context
+    if not context.strip():
+        context = (
+            "Cannabis is used for pain, anxiety, insomnia, appetite, and relaxation. "
+            "Common products include flower, edibles, vape cartridges, tinctures, and topicals. "
+            "Strains like indica are more sedative, while sativa is more energizing. "
+            "Compounds like THC and CBD contribute to effects."
+        )
+        if DEBUG:
+            print("[Context] ℹ️ Fallback default context used.")
 
     # === Run QA
     answer_text = ""
@@ -221,16 +236,21 @@ def answer_question(question: str, context: str = "") -> dict:
         start = torch.argmax(outputs.start_logits).item()
         end = torch.argmax(outputs.end_logits).item() + 1
 
-        # Defensive bounds
+        if DEBUG:
+            print(f"[QA] Start: {start}, End: {end}")
+            print(f"[QA] Start logit max: {outputs.start_logits.max().item():.3f}")
+            print(f"[QA] End logit max: {outputs.end_logits.max().item():.3f}")
+
         if 0 <= start < end <= len(input_ids):
             tokens = input_ids[start:end]
             answer_text = tokenizer_qa.decode(tokens, skip_special_tokens=True).strip()
+            print(f"[QA] ✅ Answer: {answer_text}")
         else:
+            print("[QA] ⚠️ Invalid span")
             answer_text = ""
 
     except Exception as e:
-        if DEBUG:
-            print(f"[QA Error] {e}")
+        print(f"[QA Error] ❌ {e}")
         answer_text = ""
 
     # === Run Sentiment
@@ -240,27 +260,15 @@ def answer_question(question: str, context: str = "") -> dict:
         sentiment_result = sentiment_pipeline(question)[0]
         sentiment = sentiment_result.get("label", "NEUTRAL")
         confidence = round(float(sentiment_result.get("score", 0.0)), 3)
+        print(f"[Sentiment] 📊 {sentiment} ({confidence})")
     except Exception as e:
-        if DEBUG:
-            print(f"[Sentiment Error] {e}")
-        sentiment = "NEUTRAL"
-        confidence = 0.0
+        print(f"[Sentiment Error] ❌ {e}")
 
-    # === Escalation
     escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and answer_text != ""
 
     return {
-        "answer": answer_text,
+        "answer": answer_text or "Let me check on that and get back to you.",
         "sentiment": sentiment,
         "confidence": confidence,
         "escalate": escalate
-    }
-
-# === Return an empty structure
-def _empty_result():
-    return {
-        "answer": "",
-        "sentiment": "NEUTRAL",
-        "confidence": 0.0,
-        "escalate": False
     }
