@@ -48,27 +48,33 @@ CANNABIS_PHRASES = [
 ]
 
 # --- Match logic ---
-# --- Match logic ---
-def is_cannabis_related(text: str) -> bool:
+def is_cannabis_related(text: str) -> dict:
     text = text.lower()
     words = set(re.findall(r"\b\w+\b", text))
 
-    if words & CANNABIS_KEYWORDS:
-        print(f"[CannabisCheck] ✅ Matched keywords: {', '.join(words & CANNABIS_KEYWORDS)}")
-        return True
+    matched_keywords = list(words & CANNABIS_KEYWORDS)
+    matched_phrases = [phrase for phrase in CANNABIS_PHRASES if phrase in text]
+    matched_strains = [strain for strain in CANNABIS_STRAINS if strain in text]
 
-    for phrase in CANNABIS_PHRASES:
-        if phrase in text:
-            print(f"[CannabisCheck] ✅ Matched phrase: '{phrase}'")
-            return True
+    is_related = bool(matched_keywords or matched_phrases or matched_strains)
 
-    for strain in CANNABIS_STRAINS:
-        if strain in text:
-            print(f"[CannabisCheck] ✅ Matched known strain: '{strain}'")
-            return True
+    if is_related:
+        print(f"[CannabisCheck] ✅ Matched:")
+        if matched_keywords:
+            print(f"  - Keywords: {', '.join(matched_keywords)}")
+        if matched_phrases:
+            print(f"  - Phrases: {', '.join(matched_phrases)}")
+        if matched_strains:
+            print(f"  - Strains: {', '.join(matched_strains)}")
+    else:
+        print("[CannabisCheck] ❌ No cannabis match")
 
-    print("[CannabisCheck] ❌ No cannabis match")
-    return False
+    return {
+        "is_related": is_related,
+        "matched_keywords": matched_keywords,
+        "matched_phrases": matched_phrases,
+        "matched_strains": matched_strains
+    }
 
 # --- Inference logic ---
 def infer_marijuana_context(message: str) -> str:

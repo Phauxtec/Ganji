@@ -110,7 +110,7 @@ def answer_question(question: str, context: str = "") -> dict:
 
     if not is_cannabis_related(question):
         return {
-            "answer": "I'm here to help with cannabis-related questions! Feel free to ask about products, strains, effects, or recommendations.",
+            "answer": "I'm here to help with cannabis-related questions! Feel free to ask about products, strains, effects, o>
             "sentiment": "NEUTRAL",
             "confidence": 1.0,
             "escalate": False
@@ -142,9 +142,6 @@ def answer_question(question: str, context: str = "") -> dict:
         }
 
 
-    # === QA
-    answer_text = ""
-    try:
         inputs = tokenizer_qa.encode_plus(
             question,
             context,
@@ -247,4 +244,29 @@ def zero_shot_classify(text: str, candidate_labels: list) -> dict:
         "label": result["labels"][0],
         "score": round(float(result["scores"][0]), 3),
         "all": dict(zip(result["labels"], map(float, result["scores"])))
+    }
+
+def build_response(original, question, context, answer_text, sentiment, confidence, escalate, matches, summary=""):
+    followups = []
+
+    if matches["matched_keywords"]:
+        followups.append(f"I recognized these keywords: {', '.join(matches['matched_keywords'])}")
+
+    if matches["matched_phrases"]:
+        followups.append(f"You mentioned topics like: {', '.join(matches['matched_phrases'])}")
+
+    if answer_text:
+        followups.append(f"Here's what I can tell you: {answer_text}")
+    else:
+        followups.append("I'm not totally sure, but feel free to ask another way or give me more detail!")
+
+    return {
+        "question": original,
+        "inferred": question,
+        "context": context,
+        "sentiment": sentiment,
+        "confidence": confidence,
+        "escalate": escalate,
+        "summary": summary,
+        "answer": followups
     }
