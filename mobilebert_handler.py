@@ -108,40 +108,55 @@ def answer_question(question: str, context: str = "") -> dict:
     if not question:
         return _empty_result()
 
-    if not is_cannabis_related(question):
+    # Check for related cannabis content
+    matches = is_cannabis_related(question)
+    if isinstance(matches, dict):
+        is_related = matches.get("is_related", False)
+    else:
+        is_related = matches  # For backwards compatibility
+
+    if not is_related:
         return {
-            "answer": "I'm here to help with cannabis-related questions! Feel free to ask about products, strains, effects, o>
+            "question": original,
+            "inferred": question,
+            "context": context,
+            "answer": ["I'm here to help with cannabis-related questions! Try asking about products, effects, or strains."],
             "sentiment": "NEUTRAL",
             "confidence": 1.0,
-            "escalate": False
+            "escalate": False,
+            "summary": ""
         }
 
-    # === Dynamic Context Accumulation (DEV)
+    if original.lower().strip() == "reset context":
+        CONTEXT_STACK.clear()
+        return {
+            "question": original,
+            "inferred": question,
+            "context": "",
+            "answer": ["Context memory has been cleared."],
+            "sentiment": "NEUTRAL",
+            "confidence": 1.0,
+            "escalate": False,
+            "summary": ""
+        }
+
+    # === Context memory
     if context.strip():
         CONTEXT_STACK.append(context)
     else:
         CONTEXT_STACK.append(question)
 
-    # Keep stack bounded
     if len(CONTEXT_STACK) > MAX_STACK_LENGTH:
         CONTEXT_STACK.pop(0)
 
-    # Build context
     context = " ".join(CONTEXT_STACK[-MAX_STACK_LENGTH:])
 
     if DEBUG:
         print(f"[Context Stack] Using {len(CONTEXT_STACK)} messages")
 
-    if original.lower().strip() == "reset context":
-        CONTEXT_STACK.clear()
-        return {
-            "answer": "Context memory has been cleared.",
-            "sentiment": "NEUTRAL",
-            "confidence": 1.0,
-            "escalate": False
-        }
-
-
+    # === QA Answering
+    answer_text = ""
+    try:
         inputs = tokenizer_qa.encode_plus(
             question,
             context,
@@ -166,12 +181,9 @@ def answer_question(question: str, context: str = "") -> dict:
         else:
             if DEBUG:
                 print("[QA] ⚠️ Invalid span")
-            answer_text = ""
-
     except Exception as e:
         if DEBUG:
             print(f"[QA Error] ❌ {e}")
-        answer_text = ""
 
     # === Sentiment
     sentiment = "NEUTRAL"
@@ -186,18 +198,22 @@ def answer_question(question: str, context: str = "") -> dict:
             print(f"[Sentiment Error] ❌ {e}")
 
     # === Escalation
-    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and answer_text != ""
+    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and bool(answer_text)
 
-    return {
-        "question": original,
-        "inferred": question,
-        "summary": summarize_text(original) if SUMMARIZER_MODEL and len(original.split()) > 7 else "",
-        "context": context,
-        "answer": answer_text or "I'm not totally sure, but feel free to ask another way!",
-        "sentiment": sentiment,
-        "confidence": confidence,
-        "escalate": escalate
-    }
+    # === Optional Summary
+    summary = summarize_text(original) if SUMMARIZER_MODEL and len(original.split()) > 7 else ""
+
+    return build_response(
+        original=original,
+        question=question,
+        context=context,
+        answer_text=answer_text,
+        sentiment=sentiment,
+        confidence=confidence,
+        escalate=escalate,
+        matches=matches,
+        summary=summary
+    )
 
 
 # === Return an empty structure
