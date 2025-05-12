@@ -193,6 +193,8 @@ def answer_question(question: str, context: str = "") -> dict:
 
     return {
         "question": original,
+        "inferred": question,
+        "summary": summarize_text(original) if SUMMARIZER_MODEL and len(original.split()) > 7 else "",
         "context": context,
         "answer": answer_text or "I'm not totally sure, but feel free to ask another way!",
         "sentiment": sentiment,
