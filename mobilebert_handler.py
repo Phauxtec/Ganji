@@ -35,6 +35,11 @@ from transformers import (
     pipeline
 )
 
+# === Temporary Context Stack (DEV ONLY) ===
+CONTEXT_STACK = []
+MAX_STACK_LENGTH = 30
+
+
 # === Load QA model
 if MODEL_NAME_QA:
     try:
@@ -111,13 +116,31 @@ def answer_question(question: str, context: str = "") -> dict:
             "escalate": False
         }
 
-    if not context.strip():
-        context = (
-            "Cannabis is used for pain, anxiety, insomnia, appetite, and relaxation. "
-            "Common products include flower, edibles, vape cartridges, tinctures, and topicals. "
-            "Strains like indica are more sedative, while sativa is more energizing. "
-            "Compounds like THC and CBD contribute to effects."
-        )
+	# === Dynamic Context Accumulation (DEV)
+	if context.strip():
+	    CONTEXT_STACK.append(context)
+	else:
+	    CONTEXT_STACK.append(question)
+
+	# Keep stack bounded
+	if len(CONTEXT_STACK) > MAX_STACK_LENGTH:
+	    CONTEXT_STACK.pop(0)
+
+	# Build context
+	context = " ".join(CONTEXT_STACK[-MAX_STACK_LENGTH:])
+
+	if DEBUG:
+	    print(f"[Context Stack] Using {len(CONTEXT_STACK)} messages")
+
+	if original.lower().strip() == "reset context":
+	    CONTEXT_STACK.clear()
+	    return {
+	        "answer": "Context memory has been cleared.",
+	        "sentiment": "NEUTRAL",
+	        "confidence": 1.0,
+	        "escalate": False
+	    }
+
 
     # === QA
     answer_text = ""
