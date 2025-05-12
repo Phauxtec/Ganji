@@ -1,23 +1,13 @@
 import os
-import random
-import torch
-import re
-
-from flask import Flask, request, jsonify
-
-from cannabis_nlp import is_cannabis_related, infer_marijuana_context
-
-from transformers import (
-    MobileBertTokenizer,
-    MobileBertForQuestionAnswering,
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    pipeline
-)
 
 # === Environment ===
 MODEL_NAME_QA = os.getenv("MODEL_NAME", "deepset/minilm-uncased-squad2")
-MODEL_NAME_SENTIMENT = os.getenv("SENTIMENT_MODEL", "distilbert-base-uncased-finetuned-sst-2-english")
+MODEL_NAME_SENTIMENT = os.getenv("SENTIMENT_MODEL", "cardiffnlp/twitter-roberta-base-sentiment-latest")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+NLI_MODEL = os.getenv("NLI_MODEL")
+SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL")
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL")
+
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.5))
 MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", 512))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
@@ -26,32 +16,100 @@ MIN_LOGIT_MARGIN = float(os.getenv("MIN_LOGIT_MARGIN", 2.0))  # for QA confidenc
 # === Device setup ===
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import random
+import torch
+import re
+import logging
+logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+
+from flask import Flask, request, jsonify
+
+from cannabis_nlp import is_cannabis_related, infer_marijuana_context
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForQuestionAnswering,
+    AutoModelForSequenceClassification,
+    AutoModel,
+    pipeline
+)
+
 # === Load QA model
-try:
-    tokenizer_qa = MobileBertTokenizer.from_pretrained(MODEL_NAME_QA)
-    model_qa = MobileBertForQuestionAnswering.from_pretrained(MODEL_NAME_QA).to(DEVICE)
-except Exception as e:
-    raise RuntimeError(f"[QA Model Error] Failed to load '{MODEL_NAME_QA}': {e}")
+if MODEL_NAME_QA:
+    try:
+        tokenizer_qa = AutoTokenizer.from_pretrained(MODEL_NAME_QA)
+        model_qa = AutoModelForQuestionAnswering.from_pretrained(MODEL_NAME_QA).to(DEVICE)
+    except Exception as e:
+        raise RuntimeError(f"[QA Model Error] Failed to load '{MODEL_NAME_QA}': {e}")
 
-# === Load Sentiment model
-try:
-    tokenizer_sent = AutoTokenizer.from_pretrained(MODEL_NAME_SENTIMENT)
-    model_sent = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME_SENTIMENT).to(DEVICE)
-    sentiment_pipeline = pipeline("sentiment-analysis", model=model_sent, tokenizer=tokenizer_sent, device=0 if DEVICE.type == "cuda" else -1)
-except Exception as e:
-    raise RuntimeError(f"[Sentiment Model Error] Failed to load '{MODEL_NAME_SENTIMENT}': {e}")
+# === Sentiment ===
+if SENTIMENT_MODEL:
+    try:
+        tokenizer_sent = AutoTokenizer.from_pretrained(SENTIMENT_MODEL)
+        model_sent = AutoModelForSequenceClassification.from_pretrained(SENTIMENT_MODEL).to(DEVICE)
+        sentiment_pipeline = pipeline("sentiment-analysis", model=model_sent, tokenizer=tokenizer_sent,
+                                      device=0 if DEVICE.type == "cuda" else -1)
+    except Exception as e:
+        raise RuntimeError(f"[Sentiment Model Error] Failed to load '{SENTIMENT_MODEL}': {e}")
 
-# === Main inference function
+# === Embeddings ===
+if EMBEDDING_MODEL:
+    try:
+        tokenizer_embed = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
+        model_embed = AutoModel.from_pretrained(EMBEDDING_MODEL).to(DEVICE)
+    except Exception as e:
+        raise RuntimeError(f"[Embedding Model Error] Failed to load '{EMBEDDING_MODEL}': {e}")
+
+# === NLI / Zero-Shot ===
+if NLI_MODEL:
+    try:
+        tokenizer_nli = AutoTokenizer.from_pretrained(NLI_MODEL)
+        model_nli = AutoModelForSequenceClassification.from_pretrained(NLI_MODEL).to(DEVICE)
+        nli_pipeline = pipeline("zero-shot-classification", model=model_nli, tokenizer=tokenizer_nli,
+                                device=0 if DEVICE.type == "cuda" else -1)
+    except Exception as e:
+        raise RuntimeError(f"[NLI Model Error] Failed to load '{NLI_MODEL}': {e}")
+
+# === Summarizer ===
+if SUMMARIZER_MODEL:
+    try:
+        summarizer_pipeline = pipeline("summarization", model=SUMMARIZER_MODEL,
+                                       tokenizer=SUMMARIZER_MODEL,
+                                       device=0 if DEVICE.type == "cuda" else -1)
+    except Exception as e:
+        raise RuntimeError(f"[Summarizer Error] Failed to load '{SUMMARIZER_MODEL}': {e}")
+
+# === Classifier ===
+if CLASSIFIER_MODEL:
+    try:
+        classifier_pipeline = pipeline("text-classification", model=CLASSIFIER_MODEL,
+                                       tokenizer=CLASSIFIER_MODEL,
+                                       device=0 if DEVICE.type == "cuda" else -1)
+    except Exception as e:
+        raise RuntimeError(f"[Classifier Error] Failed to load '{CLASSIFIER_MODEL}': {e}")
+
+
+# === Primary QA Handler ===
 def answer_question(question: str, context: str = "") -> dict:
     original = question.strip()
-    inferred = infer_marijuana_context(original)
-    cannabis_match = is_cannabis_related(inferred)
+    question = infer_marijuana_context(original)
 
-    print("\n======================= 🔍 Inference Trace =======================")
-    print(f"[Input]         🧾 Original: {original}")
-    print(f"[Input]         🧠 Inferred: {inferred}")
-    print(f"[Filter]        🌿 Cannabis Related: {cannabis_match}")
-    
+    if DEBUG:
+        print(f"[Input] 🗣 Original: {original}")
+        print(f"[Input] 🔍 Inferred: {question}")
+        print(f"[Input] 📘 Context: {context[:100]}...")
+
+    if not question:
+        return _empty_result()
+
+    if not is_cannabis_related(question):
+        return {
+            "answer": "I'm here to help with cannabis-related questions! Feel free to ask about products, strains, effects, or recommendations.",
+            "sentiment": "NEUTRAL",
+            "confidence": 1.0,
+            "escalate": False
+        }
+
     if not context.strip():
         context = (
             "Cannabis is used for pain, anxiety, insomnia, appetite, and relaxation. "
@@ -59,34 +117,12 @@ def answer_question(question: str, context: str = "") -> dict:
             "Strains like indica are more sedative, while sativa is more energizing. "
             "Compounds like THC and CBD contribute to effects."
         )
-        print(f"[Context]       📘 Using fallback context.")
 
-    else:
-        print(f"[Context]       📘 Custom context detected ({len(context)} chars)")
-
-    if not cannabis_match:
-        print(f"[Decision]      🚫 Rejected as non-cannabis question. Sending FAQ help.\n")
-        return {
-	    "answer": (
-	        "I'm here to help with cannabis-related questions. "
-	        "Here are a few things I can help with:\n\n"
-	        "• Which strains are good for sleep or pain?\n"
-	        "• What’s the difference between sativa and indica?\n"
-	        "• How do edibles or tinctures work?\n"
-	        "• What’s a good beginner product?\n"
-	        "• What does 'full spectrum' mean?\n\n"
-	        "Feel free to ask me one of these or tell me what you're looking for! 🌿"
-	    ),
-	    "sentiment": "NEUTRAL",
-	    "confidence": 1.0,
-	    "escalate": False
-	}
-
-    # === QA Inference ===
+    # === QA
     answer_text = ""
     try:
         inputs = tokenizer_qa.encode_plus(
-            inferred,
+            question,
             context,
             return_tensors="pt",
             truncation=True,
@@ -100,64 +136,89 @@ def answer_question(question: str, context: str = "") -> dict:
 
         start = torch.argmax(outputs.start_logits).item()
         end = torch.argmax(outputs.end_logits).item() + 1
-        start_conf = outputs.start_logits.max().item()
-        end_conf = outputs.end_logits.max().item()
-
-        print(f"[QA]            📍 Start={start}, End={end}, Conf=[{start_conf:.2f}, {end_conf:.2f}]")
 
         if 0 <= start < end <= len(input_ids):
             tokens = input_ids[start:end]
             answer_text = tokenizer_qa.decode(tokens, skip_special_tokens=True).strip()
-            print(f"[QA]            ✅ Answer: {answer_text}")
+            if DEBUG:
+                print(f"[QA] ✅ Answer: {answer_text}")
         else:
-            print("[QA]            ⚠️ Invalid token span for answer.")
+            if DEBUG:
+                print("[QA] ⚠️ Invalid span")
+            answer_text = ""
 
     except Exception as e:
-        print(f"[QA Error]      ❌ {e}")
+        if DEBUG:
+            print(f"[QA Error] ❌ {e}")
         answer_text = ""
 
-    # === Sentiment ===
+    # === Sentiment
     sentiment = "NEUTRAL"
     confidence = 0.0
     try:
-        sentiment_result = sentiment_pipeline(inferred)[0]
-        sentiment = sentiment_result.get("label", "NEUTRAL")
-        confidence = round(float(sentiment_result.get("score", 0.0)), 3)
-        print(f"[Sentiment]     📊 {sentiment} ({confidence})")
+        if SENTIMENT_MODEL:
+            sentiment_result = sentiment_pipeline(question)[0]
+            sentiment = sentiment_result.get("label", "NEUTRAL")
+            confidence = round(float(sentiment_result.get("score", 0.0)), 3)
     except Exception as e:
-        print(f"[SentimentError] ❌ {e}")
+        if DEBUG:
+            print(f"[Sentiment Error] ❌ {e}")
 
-    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and bool(answer_text)
-
-    print(f"[Decision]      🚦 Escalate: {escalate}")
-    print("================================================================\n")
+    # === Escalation
+    escalate = sentiment == "NEGATIVE" and confidence >= CONFIDENCE_THRESHOLD and answer_text != ""
 
     return {
-        "answer": answer_text or "I'm not totally sure, but I can help guide you. Can you clarify your question?",
+        "question": original,
+        "context": context,
+        "answer": answer_text or "I'm not totally sure, but feel free to ask another way!",
         "sentiment": sentiment,
         "confidence": confidence,
         "escalate": escalate
     }
 
 
-
-
-FAQ_SUGGESTIONS = [
-    "Which strains are best for relaxation or sleep?",
-    "What’s the difference between sativa and indica?",
-    "How strong are edibles and how long do they last?",
-    "Can cannabis help with anxiety or focus?",
-    "What’s a good product for first-time users?"
-]
-
-def get_faq_suggestion():
-    return "Here’s something you can ask:\n• " + "\n• ".join(random.sample(FAQ_SUGGESTIONS, 3))
-
-
+# === Return an empty structure
 def _empty_result():
     return {
         "answer": "",
         "sentiment": "NEUTRAL",
         "confidence": 0.0,
         "escalate": False
+    }
+# === Optional NLP Tasks ===
+
+def get_embedding(text: str) -> list:
+    if not EMBEDDING_MODEL or not model_embed:
+        raise RuntimeError("Embedding model not loaded.")
+    inputs = tokenizer_embed(text, return_tensors="pt", truncation=True, padding=True).to(DEVICE)
+    with torch.no_grad():
+        outputs = model_embed(**inputs)
+    return outputs.last_hidden_state[:, 0].squeeze().cpu().tolist()
+
+
+def summarize_text(text: str) -> str:
+    if not SUMMARIZER_MODEL or not summarizer_pipeline:
+        raise RuntimeError("Summarizer model not loaded.")
+    result = summarizer_pipeline(text, max_length=120, min_length=30, do_sample=False)
+    return result[0]["summary_text"]
+
+
+def classify_text(text: str) -> dict:
+    if not CLASSIFIER_MODEL or not classifier_pipeline:
+        raise RuntimeError("Classifier model not loaded.")
+    result = classifier_pipeline(text)[0]
+    return {
+        "label": result.get("label", "UNKNOWN"),
+        "score": round(float(result.get("score", 0.0)), 3)
+    }
+
+
+def zero_shot_classify(text: str, candidate_labels: list) -> dict:
+    if not NLI_MODEL or not nli_pipeline:
+        raise RuntimeError("Zero-shot model not loaded.")
+    result = nli_pipeline(text, candidate_labels)
+    return {
+        "label": result["labels"][0],
+        "score": round(float(result["scores"][0]), 3),
+        "all": dict(zip(result["labels"], map(float, result["scores"])))
     }
