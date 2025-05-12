@@ -116,30 +116,30 @@ def answer_question(question: str, context: str = "") -> dict:
             "escalate": False
         }
 
-	# === Dynamic Context Accumulation (DEV)
-	if context.strip():
-	    CONTEXT_STACK.append(context)
-	else:
-	    CONTEXT_STACK.append(question)
+    # === Dynamic Context Accumulation (DEV)
+    if context.strip():
+        CONTEXT_STACK.append(context)
+    else:
+        CONTEXT_STACK.append(question)
 
-	# Keep stack bounded
-	if len(CONTEXT_STACK) > MAX_STACK_LENGTH:
-	    CONTEXT_STACK.pop(0)
+    # Keep stack bounded
+    if len(CONTEXT_STACK) > MAX_STACK_LENGTH:
+        CONTEXT_STACK.pop(0)
 
-	# Build context
-	context = " ".join(CONTEXT_STACK[-MAX_STACK_LENGTH:])
+    # Build context
+    context = " ".join(CONTEXT_STACK[-MAX_STACK_LENGTH:])
 
-	if DEBUG:
-	    print(f"[Context Stack] Using {len(CONTEXT_STACK)} messages")
+    if DEBUG:
+        print(f"[Context Stack] Using {len(CONTEXT_STACK)} messages")
 
-	if original.lower().strip() == "reset context":
-	    CONTEXT_STACK.clear()
-	    return {
-	        "answer": "Context memory has been cleared.",
-	        "sentiment": "NEUTRAL",
-	        "confidence": 1.0,
-	        "escalate": False
-	    }
+    if original.lower().strip() == "reset context":
+        CONTEXT_STACK.clear()
+        return {
+            "answer": "Context memory has been cleared.",
+            "sentiment": "NEUTRAL",
+            "confidence": 1.0,
+            "escalate": False
+        }
 
 
     # === QA
