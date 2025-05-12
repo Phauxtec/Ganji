@@ -1,7 +1,7 @@
-import os
-
 # === Environment ===
+import os
 MODEL_NAME_QA = os.getenv("MODEL_NAME", "deepset/minilm-uncased-squad2")
+SENTIMENT_MODEL = os.getenv("SENTIMENT_MODEL", "cardiffnlp/twitter-roberta-base-sentiment-latest")
 MODEL_NAME_SENTIMENT = os.getenv("SENTIMENT_MODEL", "cardiffnlp/twitter-roberta-base-sentiment-latest")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 NLI_MODEL = os.getenv("NLI_MODEL")
@@ -13,12 +13,13 @@ MAX_INPUT_LENGTH = int(os.getenv("MAX_INPUT_LENGTH", 512))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 MIN_LOGIT_MARGIN = float(os.getenv("MIN_LOGIT_MARGIN", 2.0))  # for QA confidence
 
+import random
+import re
+
 # === Device setup ===
+import torch
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-import random
-import torch
-import re
 import logging
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 

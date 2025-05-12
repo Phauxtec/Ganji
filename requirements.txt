@@ -2,3 +2,6 @@ flask
 torch
 transformers
 python-dotenv
+
+scikit-learn
+sentence-transformers
